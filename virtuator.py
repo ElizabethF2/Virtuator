@@ -5,14 +5,12 @@ a tool for automatically building and managing VMs
 
 Virtuator is a virtual machine management utility 
 
-# TODO: write help docs
-
 If you are packaging Virtuator, see the docstring attached to
 _apply_packager_overwrites()
 
 '''
 
-# TODO virtuator system uninstall, --force-remove-module, --no-remove-module, --force-remove-data, --no-remove-data, --force-remove-vms, --no-remove-vms, no prompt if not found
+
 
 import sys, platform, io, os, stat, errno, time
 import subprocess, shutil, shlex, signal, socket
