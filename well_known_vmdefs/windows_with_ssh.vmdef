@@ -1,0 +1,134 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1
+NAME = 'windows_with_ssh'
+REQUIRES = ('windows_with_networking', 'alpine_linux_with_ssh')
+
+# TODO update to work w/o delayed expansion
+
+_SSH_SCRIPT = r'''
+:ssh_install_loop
+set code="Get-WindowsCapability -Online -Name *OpenSSH.Server*"
+powershell -c "%code% | Add-WindowsCapability -Online"
+set code="(Get-WindowsCapability -Online -Name *OpenSSH.Server*).State"
+powershell -c "%code%" | findstr Installed
+if not '%errorlevel%' == '0' (
+  usoclient startinteractivescan
+  set "code=Get-WmiObject -Namespace 'root\cimv2\mdm\dmmap'"
+  set "code=%code% -Class 'MDM_EnterpriseModernAppManagement_AppManagement01'"
+  set "code=(%code%).UpdateScanMethod()"
+  powershell -c "%code%"
+  timeout 75
+  goto ssh_install_loop
+)
+
+net start sshd
+net stop sshd
+sc config sshd start=auto
+
+set code=New-NetFirewallRule
+set "code=%code% -Name sshd -DisplayName 'sshd' -Enabled True"
+set "code=%code% -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22"
+powershell -c "%code%"
+
+pushd "%PROGRAMDATA%\\ssh"
+echo _PUBLIC_KEY >> administrators_authorized_keys
+set code="get-acl ssh_host_ecdsa_key"
+powershell -c "%code% | set-acl administrators_authorized_keys"
+set code=
+net start sshd
+popd
+
+del /s/f/q "%ProgramData%/ssh/logs"
+'''.strip()
+
+_KEY_PATH = '/tmp/ssh_key.pem'
+
+_KEY_GENERATION_SCRIPT = '''
+  echo ==============================================
+  echo Setting up packages used during key generation
+  echo ==============================================
+  ensure_has openssh || exit $?
+  echo
+
+  echo ==========================
+  echo Generating keys for client
+  echo ==========================
+  ssh-keygen -t ed25519 -f _KEY_PATH -P "" || exit $?
+  echo
+'''
+
+SKIP_BUILD_BOOT = False
+
+def BUILD(vm):
+  import os
+  vm.vprint(1, 'Running key generation script')
+  script = (
+    vm.prepend_system_shell_helpers(_KEY_GENERATION_SCRIPT)
+      .replace('_KEY_PATH', _KEY_PATH)
+  )
+  vm.pipe_shell(script, echo_output = True, check = True)
+  vm.vprint(1, 'Storing private key')
+  private_key = vm.get_file_data(_KEY_PATH)
+  vm_data_dir = vm.get_per_vm_data_dir()
+  private_key_path = os.path.join(vm_data_dir, 'ssh_key.pem')
+  with open(private_key_path, 'wb') as f:
+    os.fchmod(f.fileno(), 0o600)
+    f.write(private_key)
+  vm.vprint(1, 'Getting public key')
+  public_key = vm.get_file_data(_KEY_PATH+'.pub')
+  public_key = ' '.join(public_key.decode().strip().split()[:-1])
+  public_key += ' {}@{}'.format(get_username(vm), get_hostname(vm))
+  extra_cmds = vm.get_custom_parameter('extra_first_boot_commands',
+                                       default = '')
+  extra_cmds = (
+    _SSH_SCRIPT.replace('_PUBLIC_KEY', public_key) +
+    extra_cmds
+  )
+  vm = vm.wrap_with_custom_parameters({
+    'extra_first_boot_commands': extra_cmds
+  })
+  vm.send_keys('poweroff\n')
+  vm.wait_until_stopped()
+  vm.super().BUILD(vm)
+
+SKIP_AUTO_BOOT = True
+
+def BOOT(vm):
+  boot_with_ssh_port(vm, fetch_key = False, manual_boot = True)
+  vm.super().BOOT(vm)
+
+_SSH_CONNECTION_RESET = 255
+_DEFAULT_GRACE_PERIOD = 30
+
+def SSH(vm):
+  import time
+  period = vm.get_custom_parameter('connection_reset_grace_period',
+                                   default = _DEFAULT_GRACE_PERIOD)
+  period = None if period == 'None' else float(period)
+  if period:
+    deadline = time.time() + period
+  while True:
+    ret = vm.super(index = 1).SSH(vm, vm_ssh_user = get_username(vm))
+    if not period or ret != _SSH_CONNECTION_RESET or time.time() > deadline:
+      break
+    time.sleep(1)
+  return ret
+
+def PUT(vm, src, dst):
+  user = get_username(vm)
+  return vm.super(index = 1).PUT(vm, src, dst, vm_ssh_user = user)
+
+def PUTD(vm, src, dst):
+  user = get_username(vm)
+  return vm.super(index = 1).PUTD(vm, src, dst, vm_ssh_user = user)
+
+def GET(vm, src, dst):
+  user = get_username(vm)
+  return vm,super(index = 1).GET(vm, src, dst, vm_ssh_user = user)
+
+def GETD(vm, src, dst):
+  user = get_username(vm)
+  return vm.super(index = 1).GETD(vm, src, dst, vm_ssh_user = user)
+
+__import__('virtuator').handle()

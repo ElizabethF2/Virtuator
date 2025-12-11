@@ -1,0 +1,209 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1
+NAME = 'arch_linux'
+ARCH = ['x86_64']
+MEMORY = '512M'
+DISKS = [{'SIZE': '50G'}]
+NETWORK = None
+
+_CHROOT = '/tmp/archroot'
+
+_BUILD_SCRIPT = '''
+echo -------------------------------------------------
+echo Installing and updating packages used to build VM
+echo -------------------------------------------------
+ensure_has gpg parted e2fsprogs zstd
+echo
+
+echo ------------------------------------------------
+echo Acquiring Arch signing key via known fingerprint
+echo ------------------------------------------------
+gpg --recv-keys 3E80CA1A8B89F69CBA57D98A76A5EF9054449A5C
+# Uncomment the line below to use WKD instead but be aware of the security
+# implications first
+# gpg --auto-key-locate clear,wkd -v --locate-external-key pierre@archlinux.org
+echo
+
+echo -----------------
+echo Partitioning disk
+echo -----------------
+parted "$(get_disk_at 0)" --script mklabel gpt || exit $?
+parted "$(get_disk_at 0)" --script mkpart primary fat32 1MiB 100MiB || exit $?
+parted "$(get_disk_at 0)" --script set 1 esp on || exit $?
+parted "$(get_disk_at 0)" --script mkpart primary ext4 100MiB 100% || exit $?
+parted "$(get_disk_at 0)" --script print
+partprobe
+echo
+
+echo ----------------------------
+echo Formatting and mounting disk
+echo ----------------------------
+mkfs.vfat -F 32 "$(get_disk_at 0 0)" || exit $?
+mkfs.ext4 "$(get_disk_at 0 1)" || exit $?
+mkdir -p _CHROOT || exit $?
+mount_disk_at 0 1 _CHROOT || exit $?
+echo
+
+echo -----------------------
+echo Downloading Arch rootfs
+echo -----------------------
+download_file TAR_URL _CHROOT/rootfs.tar.zst
+echo
+
+echo ---------------------
+echo Verifying Arch rootfs
+echo ---------------------
+[ "$(hash_file sha256 _CHROOT/rootfs.tar.zst)" = "TAR_HASH" ] || exit $?
+gpg --verify /tmp/archsignature _CHROOT/rootfs.tar.zst || exit $?
+echo
+
+echo --------------
+echo Extract rootfs
+echo --------------
+cd _CHROOT
+unzstd -d rootfs.tar.zst || exit $?
+rm rootfs.tar.zst || exit $?
+tar xf rootfs.tar || exit $?
+rm rootfs.tar || exit $?
+mv _CHROOT/root.x86_64/* _CHROOT || exit $?
+rmdir root.x86_64 || exit $?
+
+echo -----------------------------------------------------
+echo Setting up EFI, hostname DNS resolver, and mirrorlist
+echo -----------------------------------------------------
+mkdir -p _CHROOT/efi || exit $?
+mount_disk_at 0 0 _CHROOT/efi || exit $?
+printf archlinux > _CHROOT/etc/hostname || exit $?
+cp /etc/resolv.conf _CHROOT/etc/resolv.conf || exit $?
+mv /tmp/archmirrors _CHROOT/etc/pacman.d/mirrorlist || exit $?
+echo
+
+echo -------------------------------------
+echo Setting password, keymap and timezone
+echo -------------------------------------
+chroot _CHROOT bash arch-chroot / bash <<ARCHROOTEOF || exit $?
+  echo "archlinux" | passwd root --stdin || exit $?
+  echo "KEYMAP=US" > /etc/vconsole.conf
+  ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+ARCHROOTEOF
+echo
+
+echo ------------------------------------------------------
+echo Setting up pacman and installing and updating packages
+echo ------------------------------------------------------
+chroot _CHROOT bash arch-chroot / bash <<ARCHROOTEOF || exit $?
+  pacman-key --init
+  pacman-key --populate
+  pacman-key --refresh-keys
+  pacman -Syu --noconfirm --needed linux linux-firmware grub efibootmgr \\
+    || exit $?
+ARCHROOTEOF
+
+echo ---------------------
+echo Setting up bootloader
+echo ---------------------
+echo
+chroot _CHROOT bash arch-chroot / bash <<ARCHROOTEOF || exit $?
+  _BOOTLOADER_SCRIPT
+ARCHROOTEOF
+'''
+
+_BOOTLOADER_SCRIPT = r'''
+echo ----------------
+echo Setting up fstab
+echo ----------------
+genfstab -U / >> /etc/fstab || exit $?
+echo
+
+echo ---------------
+echo Setting up GRUB
+echo ---------------
+grub_cfg='/etc/default/grub'
+prefix='GRUB_CMDLINE_LINUX_DEFAULT="'
+sed "s/$prefix/$prefix""console=ttyS0 /g" "$grub_cfg" > "$grub_cfg.new" || exit $?
+mv "$grub_cfg.new" "$grub_cfg" || exit $?
+grub-install \
+  --target=x86_64-efi \
+  --efi-directory=/efi \
+  --bootloader-id=Boot "$(get_disk_at 0 1)" || exit $?
+mv /efi/EFI/Boot/grubx64.efi /efi/EFI/Boot/bootx64.efi || exit $?
+grub-mkconfig -o /boot/grub/grub.cfg || exit $?
+echo
+'''
+
+def _get_tar_hash_and_signature(vm):
+  import random, urllib.request, json, locale
+  max_mirrors_to_try = 5
+  mtimeout = 10 # seconds
+  tar_fname = 'archlinux-bootstrap-x86_64.tar.zst'
+  mirrors_url = 'https://archlinux.org/mirrors/status/json'
+  vm.vprint(1, 'Loading mirror list from {}'.format(mirrors_url))
+  req = urllib.request.urlopen(mirrors_url)
+  all_mirrors = json.loads(req.read())
+  https_mirrors = list(filter(lambda i: i['protocol'] == 'https',
+                              all_mirrors['urls']))
+  loc = locale.getlocale()[0].split('_')[-1].lower()
+  loc_mirrors = list(filter(lambda i: loc in (i['country'].lower(),
+                                              i['country_code'].lower()),
+                            https_mirrors))
+  mirror_urls = [i['url'] for i in
+                 (loc_mirrors if loc_mirrors else https_mirrors)]
+  random.SystemRandom().shuffle(mirror_urls)
+  mirrors = '\n'.join(('Server = '+i+'$repo/os/$arch' for i in mirror_urls))
+  random.SystemRandom().shuffle(mirror_urls)
+  tar_url, tar_hash, signature = None, None, None
+  for _ in range(max_mirrors_to_try):
+    mirror = mirror_urls.pop()
+    vm.vprint(1, 'Randomly selected mirror ' + mirror)
+    base_url = mirror + 'iso/latest/'
+    if not tar_hash:
+      try:
+        url = base_url + 'sha256sums.txt'
+        vm.vprint(2, 'Downloading ' + url)
+        req = urllib.request.urlopen(url, timeout = mtimeout).read().decode()
+      except ConnectionError:
+        continue
+      hashes = {k:v for v,k in map(str.split, req.splitlines())}
+      tar_hash = hashes[tar_fname]
+    if not signature:
+      try:
+        url = base_url + tar_fname + '.sig'
+        vm.vprint(2, 'Downloading ' + url)
+        signature = urllib.request.urlopen(url, timeout = mtimeout).read()
+      except ConnectionError:
+        continue
+    tar_url = base_url + tar_fname
+    break
+  return mirrors, tar_url, tar_hash, signature
+
+def get_chroot():
+  return _CHROOT
+
+def BUILD(vm):
+  mirrors, tar_url, tar_hash, signature = _get_tar_hash_and_signature(vm)
+  vm.vprint(1, 'Copy mirrorlist and signature to VM')
+  vm.put_file_data('/tmp/archmirrors', mirrors)
+  vm.put_file_data('/tmp/archsignature', signature)
+  vm.vprint(1, 'Running build script')
+  bootloader_script = vm.prepend_system_shell_helpers(_BOOTLOADER_SCRIPT)
+  build_script = vm.prepend_system_shell_helpers(_BUILD_SCRIPT)
+  build_script = build_script.replace('_CHROOT', get_chroot())
+  build_script = build_script.replace('TAR_URL', tar_url)
+  build_script = build_script.replace('TAR_HASH', tar_hash)
+  build_script = build_script.replace('_BOOTLOADER_SCRIPT', bootloader_script)
+  vm.pipe_shell(build_script, echo_output = True, check = True)
+
+def BOOT(vm):
+  # TODO add support for non-default hostnames?
+  vm.wait_for('archlinux login:')
+  vm.send_keys('root\n')
+  vm.wait_for('Password: ')
+  vm.send_keys('archlinux\n')
+  vm.wait_for(']# ')
+
+def STOP(vm):
+  vm.run_command('poweroff')
+  vm.wait_until_stopped()
+
+__import__('virtuator').handle()

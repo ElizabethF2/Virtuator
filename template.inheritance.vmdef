@@ -1,0 +1,12 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1 # Always 1 for now, required
+NAME = 'your_vmdefs_name_here' # required
+
+def get_super():
+  import virtuator
+  return virtuator.vmdef_from('parent_vmdefs_name_here')
+
+locals().update(get_super().__dict__ | locals())
+
+__import__('virtuator').handle()

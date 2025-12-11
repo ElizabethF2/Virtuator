@@ -1,0 +1,195 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1
+NAME = 'alpine_linux_base'
+ARCH = ['x86_64', 'aarch64', 'x86', 'arm', 'riscv']
+MEMORY = '512M'
+DISKS = [{'SIZE': '50G'}]
+NETWORK = None
+
+_DOWNLOADS_URL = 'https://alpinelinux.org/downloads'
+
+_ARCH_MAP = {
+  'armv7': 'arm',
+}
+
+_MAIN_BUILD_SCRIPT = '''
+  echo =====================================
+  echo Setting up packages used during build
+  echo =====================================
+  ensure_has gpg parted e2fsprogs || exit $?
+  echo
+
+  echo ===========================================
+  echo Acquiring signing key via known fingerprint
+  echo ===========================================
+  # Fingerprint from https://alpinelinux.org/keybase.txt
+  KNOWN_FINGERPRINT="0482D84022F52DF1C4E7CD43293ACD0907D9495A" 
+  gpg --recv-keys "$KNOWN_FINGERPRINT"
+  echo
+  
+  echo =================
+  echo Partitioning disk
+  echo =================
+  parted "$(get_disk_at 0)" --script mklabel gpt || exit $?
+  parted "$(get_disk_at 0)" --script mkpart primary fat32 1MiB 100MiB \\
+    || exit $?
+  parted "$(get_disk_at 0)" --script set 1 esp on || exit $?
+  parted "$(get_disk_at 0)" --script mkpart primary ext4 100MiB 100% || exit $?
+  parted "$(get_disk_at 0)" --script print
+  echo
+  
+  echo ==================================
+  echo Formatting and mounting partitions
+  echo ==================================
+  mkfs.vfat -F 32 "$(get_disk_at 0 0)" || exit $?
+  mkfs.ext4 "$(get_disk_at 0 1)" || exit $?
+  mkdir -p _CHROOT || exit $?
+  mount_disk_at 0 1 _CHROOT || exit $?
+  echo
+  
+  echo ==================
+  echo Downloading rootfs
+  echo ==================
+  download_file "ROOTFS_URL" _CHROOT/rootfs.tar.gz
+  echo
+  
+  echo =====================
+  echo Downloading signature
+  echo =====================
+  download_file "SIGNATURE_URL" _CHROOT/rootfs.tar.gz.asc
+  echo
+
+  echo ================
+  echo Verifying rootfs
+  echo ================
+  gpg_out="$(gpg --verify _CHROOT/rootfs.tar.gz.asc \\
+                 _CHROOT/rootfs.tar.gz 2>&1)" || exit $?
+  echo "$gpg_out" | grep "$KNOWN_FINGERPRINT" >/dev/null || exit $?
+  echo
+
+  echo =================
+  echo Extracting rootfs
+  echo =================
+  cd "_CHROOT"
+  tar xzf rootfs.tar.gz || exit $?
+  rm rootfs.tar.gz || $?
+  rm rootfs.tar.gz.asc || $?
+  echo
+  
+  echo ==============
+  echo Setting up EFI
+  echo ==============
+  mkdir -p _CHROOT/efi
+  mount_disk_at 0 0 _CHROOT/efi || exit $?
+  echo
+
+  echo =======================
+  echo Setting up DNS resolver
+  echo =======================
+  cp /etc/resolv.conf _CHROOT/etc/resolv.conf || exit $?
+  echo
+  
+  echo =================
+  echo Setting up chroot
+  echo =================
+  mount -o bind /dev _CHROOT/dev || exit $?
+  mount -t proc none _CHROOT/proc || exit $?
+  mount -o bind /sys _CHROOT/sys || exit $?
+  mount -t tmpfs tmpfs _CHROOT/tmp || exit $?
+  echo
+'''
+
+_CHROOT_BUILD_SCRIPT = '''
+  echo ============================
+  echo Installing required packages
+  echo ============================
+  apk update || exit $?
+  apk add linux-virt alpine-conf grub-efi efibootmgr || exit $?
+  echo
+
+  echo ===========================
+  echo Running Alpine setup script
+  echo ===========================
+  setup-alpine -q || exit $?
+  echo
+
+  echo ================
+  echo Setting password
+  echo ================
+  printf "alpine\\nalpine\\n" | passwd root || exit $?
+
+  echo ===================
+  echo Enable serial getty
+  echo ===================
+  echo "ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100" >> /etc/inittab \\
+    || exit $?
+
+  echo ==========================
+  echo Setting up GRUB bootloader
+  echo ==========================
+  grub-install \\
+    --target=$(uname -m)-efi \\
+    --efi-directory=/efi \\
+    --bootloader-id=Boot \\
+    "$(get_disk_at 0 1)" || exit $?
+  mv /efi/EFI/Boot/grubx64.efi /efi/EFI/Boot/bootx64.efi || exit $?
+  args="quiet rootfstype=ext4 modules=sd-mod,usb-storage,ext4 console=ttyS0"
+  cmd='GRUB_CMDLINE_LINUX_DEFAULT="'$args'"'
+  printf "\n$cmd\n" >> /etc/default/grub
+  grub-mkconfig -o /boot/grub/grub.cfg || exit $?
+  echo
+'''
+
+# TODO grub/efi names for other arch
+
+def _get_rootfs_and_signature_urls(vm):
+  import re, urllib.request, html
+  arch = vm.get_arch()
+  arch = _ARCH_MAP.get(arch, arch)
+  if arch == 'riscv':
+    raise NotImplementedError() # TODO
+  req = urllib.request.urlopen(_DOWNLOADS_URL)
+  htm = html.unescape(req.read().decode())
+  rx = 'https://.+?{}/.+?-minirootfs-.+?.tar.gz'.format(arch)
+  url = sorted(set(re.findall(rx, htm)))[-1]
+  return url, url+'.asc'
+
+def get_chroot():
+  return '/tmp/alpineroot'
+
+def BUILD(vm):
+  vm.vprint(1, 'Locating download URLs')
+  rootfs_url, signature_url = _get_rootfs_and_signature_urls(vm)
+  vm.vprint(2, '  rootfs URL:')
+  vm.vprint(2, '    {}'.format(rootfs_url))
+  vm.vprint(2, '  signature URL:')
+  vm.vprint(2, '    {}'.format(signature_url))
+  vm.vprint(1, 'Running main build script')
+  script = (
+    vm.prepend_system_shell_helpers(_MAIN_BUILD_SCRIPT)
+      .replace('ROOTFS_URL', rootfs_url)
+      .replace('SIGNATURE_URL', signature_url)
+      .replace('_CHROOT', get_chroot())
+  )
+  vm.pipe_shell(script, echo_output = True, check = True)
+  vm.vprint(1, 'Sending second build script to VM')
+  path = '_CHROOT/tmp/chroot_build_script.sh'.replace('_CHROOT', get_chroot())
+  vm.put_file_data(path, vm.prepend_system_shell_helpers(_CHROOT_BUILD_SCRIPT))
+  vm.vprint(1, 'Running second build script inside chroot')
+  cmd = 'chroot _CHROOT /bin/ash /tmp/chroot_build_script.sh'
+  cmd = cmd.replace('_CHROOT', get_chroot())
+  vm.run_command(cmd, echo_output = True, check = True)
+
+def BOOT(vm):
+  vm.wait_for(' login:')
+  vm.send_keys('root\n')
+  vm.wait_for('Password: ')
+  vm.send_keys('alpine\n')
+  vm.wait_for('~# ')
+
+def STOP(vm):
+  vm.run_command('poweroff')
+  vm.wait_until_stopped()
+
+__import__('virtuator').handle()

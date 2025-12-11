@@ -1,0 +1,37 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1
+NAME = 'vsbuild'
+REQUIRES = 'windows_with_qol'
+
+_ARCH_MAP = {
+  'x86_64': 'x86.x64',
+  'aarch64': 'ARM64',
+  'arm': 'ARM',
+}
+
+_BUILD_TOOLS_PKG_NAME = 'Microsoft.VisualStudio.2022.BuildTools'
+
+_VS_PKGS = [
+  'Microsoft.VisualStudio.Workload.VCTools',
+  'Microsoft.VisualStudio.Component.VC.Tools.ARCH',
+  'Microsoft.VisualStudio.Component.Windows11SDK.26100',
+]
+
+def BUILD(vm):
+  first_boot_cmds = vm.get_custom_parameter('extra_first_boot_commands',
+                                            default = '')
+  parch = vm.get_arch()
+  parch = _ARCH_MAP.get(parch, parch.upper())
+  script = (
+    'winget install {} --force --override "--wait --passive {}"\n\n'.format(
+      _BUILD_TOOLS_PKG_NAME,
+      ' '.join(('--add {}'.format(pkg.replace('ARCH', parch))
+                for pkg in _VS_PKGS)),
+  ))
+  vm = vm.wrap_with_custom_parameters({
+    'extra_first_boot_commands': script + first_boot_cmds,
+  })
+  vm.super().BUILD(vm)
+
+__import__('virtuator').handle()

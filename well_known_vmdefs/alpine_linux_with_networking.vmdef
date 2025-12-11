@@ -1,0 +1,8 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1
+NAME = 'alpine_linux_with_networking'
+NETWORK = 'user'
+REQUIRES = 'alpine_linux_base'
+
+__import__('virtuator').handle()

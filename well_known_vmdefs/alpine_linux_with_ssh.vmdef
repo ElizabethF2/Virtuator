@@ -1,0 +1,225 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1
+NAME = 'alpine_linux_with_ssh'
+REQUIRES = 'alpine_linux_with_networking'
+
+_KEY_PATH = '/root/vm_ssh_key.pem'
+
+_BUILD_SCRIPT = '''
+echo ---------------
+echo Entering chroot
+echo ---------------
+echo
+chroot _CHROOT /bin/ash <<CHROOTEOF || exit $?
+  echo -----------------------
+  echo Installing ssh packages
+  echo -----------------------
+  apk add openssh || exit $?
+  echo
+
+  echo ------------------------------
+  echo Generating ssh keys for server
+  echo ------------------------------
+  ssh-keygen -A || exit $?
+  echo
+
+  echo ------------------------------
+  echo Generating ssh keys for client
+  echo ------------------------------
+  ssh-keygen -t ed25519 -f _KEY_PATH -P "" || exit $?
+  echo
+
+  echo --------------------------------
+  echo Authorizing public key on server
+  echo --------------------------------
+  mkdir -p /root/.ssh || exit $?
+  cat _KEY_PATH.pub >> /root/.ssh/authorized_keys || exit $?
+  echo
+
+  echo ------------------
+  echo Cleanup public key
+  echo ------------------
+  rm _KEY_PATH.pub || exit $?
+  echo
+  
+  echo ---------------------
+  echo Enabling sshd service
+  echo ---------------------
+  rc-update add sshd || exit $?
+  echo
+
+  echo ---------------------------------------
+  echo Disabling password-based authentication
+  echo ---------------------------------------
+  echo "PasswordAuthentication no" >> /etc/ssh/sshd_config || exit $?
+  echo  
+CHROOTEOF
+'''
+
+def BUILD(vm):
+  vm.super().BUILD(vm)
+  script = (
+    _BUILD_SCRIPT
+      .replace('_CHROOT', get_chroot())
+      .replace('_KEY_PATH', _KEY_PATH)
+  )
+  vm.pipe_shell(script, echo_output = True, check = True)
+  vm.vprint(1, 'The VM\'s SSH key has been saved on the VM under {}'
+                .format(repr(_KEY_PATH)))
+
+def _get_or_create_ssh_port_and_get_local_key_path(vm):
+  import os
+  vm_data_dir = vm.get_per_vm_data_dir()
+  port_file = os.path.join(vm_data_dir, 'ssh.port')
+  try:
+    with open(port_file, 'r') as f:
+      port = int(f.read().strip())
+  except (FileNotFoundError, ValueError):
+    import random
+    port = random.SystemRandom().randint(2000, 64000)
+    with open(port_file, 'w') as f:
+      f.write(str(port))
+  key = os.path.join(vm_data_dir, 'ssh_key.pem')
+  return port, key
+
+_OWNER_RW = 0o600
+
+def boot_with_ssh_port(vm,
+                       vm_key_path = None,
+                       vm_ssh_port = 22,
+                       fetch_key = True,
+                       manual_boot = False):
+  import os
+  port, key = _get_or_create_ssh_port_and_get_local_key_path(vm)
+  ports = vm.merge_ports([{'host_port': port, 'guest_port': vm_ssh_port}])
+  if manual_boot:
+    vm.manual_boot(ports = ports)
+  else:
+    vm.ensure_booted(ports = ports)
+  try:
+    key_stats = os.stat(key)
+    chmod = getattr(os, 'chmod', None)
+    if chmod and key_stats.st_mode != _OWNER_RW:
+      chmod(key, _OWNER_RW)
+  except FileNotFoundError:
+    key_stats = None
+  if fetch_key and not key_stats and not manual_boot:
+    if not vm_key_path:
+      vm_key_path = _KEY_PATH
+    k = vm.get_file_data(vm_key_path)
+    try:
+      with open(key, 'xb') as f:
+        os.fchmod(f.fileno(), _OWNER_RW)
+        f.write(k)
+    except FileExistsError:
+      pass
+  return port, key
+
+SKIP_AUTO_BOOT = True
+
+def BOOT(vm):
+  boot_with_ssh_port(vm, manual_boot = True)
+  vm.super().BOOT(vm)
+
+def SSH(vm,
+        vm_key_path = None,
+        vm_ssh_port = 22,
+        vm_ssh_user = 'root',
+        use_key = True):
+  import time, subprocess, shutil
+  ssh = shutil.which('ssh')
+  if not ssh:
+    raise FileNotFoundError('ssh not installed')
+  port, key = boot_with_ssh_port(vm,
+                                 vm_key_path = vm_key_path,
+                                 vm_ssh_port = vm_ssh_port,
+                                 fetch_key = use_key)
+  cmd = [ssh]
+  if use_key:
+    cmd += ['-o', 'IdentitiesOnly=yes', '-i', key]
+  cmd += ['-p{}'.format(port), '{}@localhost'.format(vm_ssh_user)]
+  return subprocess.run(cmd).returncode
+
+def _scp(vm,
+         src,
+         dst,
+         recursive = False,
+         vm_key_path = None,
+         vm_ssh_port = 22,
+         use_key = True):
+    import shutil, subprocess
+    scp = shutil.which('scp')
+    if not scp:
+      raise FileNotFoundError('scp not installed')
+    port, key = boot_with_ssh_port(vm,
+                                   vm_key_path = vm_key_path,
+                                   vm_ssh_port = vm_ssh_port,
+                                   fetch_key = use_key)
+    cmd = [scp]
+    if recursive:
+      cmd += ['-r']
+    if use_key:
+      cmd += ['-o', 'IdentitiesOnly=yes', '-i', key]
+    cmd += ['-P{}'.format(port), src, dst]
+    return subprocess.run(cmd).returncode
+
+def PUT(vm,
+        src,
+        dst,
+        vm_ssh_user = 'root',
+        vm_key_path = None,
+        vm_ssh_port = 22,
+        use_key = True):
+  return _scp(vm,
+              src,
+              '{}@localhost:{}'.format(vm_ssh_user, dst),
+              vm_key_path = vm_key_path,
+              vm_ssh_port = vm_ssh_port,
+              use_key = use_key)
+
+def PUTD(vm,
+         src,
+         dst,
+         vm_ssh_user = 'root',
+         vm_key_path = None,
+         vm_ssh_port = 22,
+         use_key = True):
+  return _scp(vm,
+              src,
+              '{}@localhost:{}'.format(vm_ssh_user, dst),
+              vm_key_path = vm_key_path,
+              vm_ssh_port = vm_ssh_port,
+              use_key = use_key,
+              recursive = True)
+
+def GET(vm,
+        src,
+        dst,
+        vm_ssh_user = 'root',
+        vm_key_path = None,
+        vm_ssh_port = 22,
+        use_key = True):
+  return _scp(vm,
+              '{}@localhost:{}'.format(vm_ssh_user, src),
+              dst,
+              vm_key_path = vm_key_path,
+              vm_ssh_port = vm_ssh_port,
+              use_key = use_key)
+
+def GETD(vm,
+         src,
+         dst,
+         vm_ssh_user = 'root',
+         vm_key_path = None,
+         vm_ssh_port = 22,
+         use_key = True):
+  return _scp(vm,
+              '{}@localhost:{}'.format(vm_ssh_user, src),
+              dst,
+              vm_key_path = vm_key_path,
+              vm_ssh_port = vm_ssh_port,
+              use_key = use_key,
+              recursive = True)
+
+__import__('virtuator').handle()

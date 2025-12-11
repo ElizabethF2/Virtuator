@@ -1,0 +1,33 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1 # Always 1 for now, required
+SYSTEMIMG = 'alpinelatest' or None
+NAME = 'your_vmdefs_name_here' # required
+MEMORY = '128M'
+DISKS = [{'SIZE':'50G'}]
+NETWORK = 'user' or None
+UEFI = True
+SECURE_BOOT = True
+TPM = 1.2 or 2.0 or 2 or True or None
+REQUIRES 'parent_vmdef_name' or ['parent_vmdef_name_1', 'parent_vmdef_name_2']
+GRAPHICS = False
+
+SKIP_DISK_CREATION = False
+SKIP_BUILD_BOOT = False
+SKIP_AUTO_BOOT = False
+
+def BUILD(vm): pass # required
+
+def BOOT(vm): pass
+
+def STOP(vm): pass
+
+def RM(vm): pass
+
+def EXPORT(vm): pass
+
+def IMPORT(vm): pass
+
+def TPM(vm): pass
+
+__import__('virtuator').handle()

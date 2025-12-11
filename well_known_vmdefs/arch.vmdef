@@ -1,0 +1,7 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1
+NAME = 'arch'
+REQUIRES = 'arch_linux'
+
+__import__('virtuator').handle()

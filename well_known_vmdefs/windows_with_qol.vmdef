@@ -1,0 +1,240 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1
+NAME = 'windows_with_qol'
+NETWORK = 'user_physical'
+REQUIRES = 'windows_with_ssh'
+
+_PRE_BOOT_SCRIPT = r'''
+echo Prevent pinning bloatware apps
+cd C:\Users\Default\AppData\Local\Microsoft\Windows\Shell
+echo {"primaryOEMPins":[]} > LayoutModification.json
+'''
+
+_FIRST_BOOT_SCRIPT = r'''
+echo Prevent future bloatware
+reg add "HKCU\Software\Policies\Microsoft\Windows\CloudContent" /v DisableCloudOptimizedContent /d 1 /t REG_DWORD /f
+reg add "HKCU\Software\Policies\Microsoft\Windows\CloudContent" /v DisableWindowsConsumerFeatures /d 1 /t REG_DWORD /f
+reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v ContentDeliveryAllowed /d 0 /t REG_DWORD /f
+reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v FeatureManagementEnabled /d 0 /t REG_DWORD /f
+reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v OemPreInstalledAppsEnabled /d 0 /t REG_DWORD /f
+reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v PreInstalledAppsEnabled /d 0 /t REG_DWORD /f
+reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v PreInstalledAppsEverEnabled /d 0 /t REG_DWORD /f
+reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v SilentInstalledAppsEnabled /d 0 /t REG_DWORD /f
+reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v SystemPaneSuggestionsEnabled /d 0 /t REG_DWORD /f
+reg add "HKCU\Software\Policies\Microsoft\Windows\Explorer" /v HideRecommendedSection /d 1 /t REG_DWORD /f
+
+echo Disable Telemetry
+reg add "HKLM\Software\Policies\Microsoft\Windows\DataCollection" /v AllowTelemetry /d 0 /t REG_DWORD /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\AppCompat" /v AITEnable /t REG_DWORD /d 0 /f
+
+echo Disable Connected User Experiences and Telemetry (aka DiagTrack)
+net stop DiagTrack
+sc config DiagTrack start=disabled
+
+echo Disable diagnostic logging
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Diagnostics\Performance" /v DisableDiagnosticTracing /d 1 /t REG_DWORD /f
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Diagnostics\Performance\BootCKCLSettings" /v Start /d 0 /t REG_DWORD /f
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Diagnostics\Performance\SecondaryLogonCKCLSettings" /v Start /d 0 /t REG_DWORD /f
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Diagnostics\Performance\ShutdownCKCLSettings" /v Start /d 0 /t REG_DWORD /f
+
+echo Disable diagnostic policy service (aka RADAR)
+sc config DPS start=disabled
+
+echo Block IrisService
+reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\IrisService" /v LastContextDate /d "9999-01-01T12:00:00Z" /t REG_SZ /f
+reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\IrisService\Providers\CTAC" /v UpdateTime /d "9999-01-01T12:00:00Z" /t REG_SZ /f
+reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\IrisService\Providers\Display" /v UpdateTime /d "9999-01-01T12:00:00Z" /t REG_SZ /f
+reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\IrisService\Providers\Storage" /v UpdateTime /d "9999-01-01T12:00:00Z" /t REG_SZ /f
+reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\IrisService\Providers\Storage" /v FreeSpace /d 0 /t REG_QWORD /f
+powershell -c "Remove-Item -Path HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\IrisService\Cache -Recurse"
+set IRIS_SERVICE_PATH=%SystemRoot%\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\IrisService.dll
+if exist "%IRIS_SERVICE_PATH%" (
+  takeown /f "%IRIS_SERVICE_PATH%"
+  icacls  "%IRIS_SERVICE_PATH%" /grant administrators:F
+  rename "%IRIS_SERVICE_PATH%" "IrisService.dll.disabled"
+)
+
+echo Disable advertising id
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" /v Enabled /d 0 /t REG_DWORD /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo" /v DisabledByGroupPolicy /d 1 /t REG_DWORD /f
+
+echo Turn off inking and typing personalization
+reg add "HKCU\Software\Microsoft\InputPersonalization" /v RestrictImplicitInkCollection /d 1 /t REG_DWORD /f
+reg add "HKCU\Software\Microsoft\InputPersonalization" /v RestrictImplicitTextCollection /d 1 /t REG_DWORD /f
+reg add "HKCU\Software\Microsoft\InputPersonalization\TrainedDataStore" /v HarvestContacts /d 0 /t REG_DWORD /f
+reg add "HKCU\Software\Microsoft\Personalization\Settings" /v AcceptedPrivacyPolicy /d 0 /t REG_DWORD /f
+
+echo Disable websites' access to language list
+reg add "HKCU\Control Panel\International\User Profile" /v HttpAcceptLanguageOptOut /d 1 /t REG_DWORD /f
+
+echo Disable Bing search in start
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Search" /v BingSearchEnabled /d 0 /t REG_DWORD /f
+
+echo Disable feedback
+reg add "HKCU\Software\Microsoft\Siuf\Rules" /v NumberOfSIUFInPeriod /d 0 /t REG_DWORD /f
+
+echo Disable CEIP tasks
+schtasks /change /TN "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser" /DISABLE
+schtasks /change /TN "\Microsoft\Windows\Application Experience\ProgramDataUpdater" /DISABLE
+schtasks /change /TN "\Microsoft\Windows\Customer Experience Improvement Program\Consolidator" /DISABLE
+schtasks /change /TN "\Microsoft\Windows\Customer Experience Improvement Program\KernelCeipTask" /DISABLE
+schtasks /change /TN "\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip" /DISABLE
+
+echo Disable device census
+schtasks /change /TN "\Microsoft\Windows\Device Information\Device" /DISABLE
+schtasks /change /TN "\Microsoft\Windows\Device Information\Device User" /DISABLE
+
+echo Disable Enterprise Data Protection Policy task
+schtasks /change /TN "\Microsoft\Windows\AppID\EDP Policy Manager" /DISABLE
+
+echo Disable Enterprise Management task
+schtasks /change /TN "\Microsoft\Windows\EnterpriseMgmt\MDMMaintenenceTask" /DISABLE
+
+echo Disabe Compatibility Telemetry
+schtasks /change /TN "\Microsoft\Windows\Application Experience\MareBackup" /DISABLE
+schtasks /change /TN "\Microsoft\Windows\Application Experience\ProgramDataUpdater" /DISABLE
+
+echo Disable wap push
+net stop dmwappushservice
+sc config dmwappushservice start=disabled
+
+echo Disable work folders client
+dism /online /Disable-Feature /FeatureName:WorkFolders-Client /Quiet /NoRestart
+
+echo Prevent apps and search from running in background (lowers memory usage but may make apps take longer to start)
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" /v GlobalUserDisabled /d 1 /t REG_DWORD /f
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Search" /v BackgroundAppGlobalToggle /d 0 /t REG_DWORD /f
+
+echo Enable memory compression
+powershell -c "Enable-MMAgent -MemoryCompression"
+
+echo Prevent Edge from running at startup
+powershell -c "Remove-ItemProperty -Path HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run -Name Microsoft*Edge*"
+
+echo Prevent OneDrive from running at startup
+powershell -c "Remove-ItemProperty -Path HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run -Name OneDrive"
+
+echo Disable running UWPs at startup
+reg add "HKCR\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData\Microsoft.SkypeApp_kzf8qxf38zg5c\SkypeStartup" /v State /d 0 /t REG_DWORD /f
+reg add "HKCR\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData\Microsoft.549981C3F5F10_8wekyb3d8bbwe\CortanaStartupId" /v State /d 0 /t REG_DWORD /f
+
+echo Set some services to delay-start to improve startup times
+sc config CryptSvc start=delayed-auto
+sc config DeviceAssociationService start=delayed-auto
+sc config EventSystem start=delayed-auto
+sc config "GameInput Service" start=delayed-auto
+sc config IKEEXT start=delayed-auto
+sc config iphlpsvc start=delayed-auto
+sc config LanmanServer start=delayed-auto
+sc config NlaSvc start=delayed-auto
+sc config nsi start=delayed-auto
+sc config RasMan start=delayed-auto
+sc config stisvc start=delayed-auto
+sc config TrkWks start=delayed-auto
+sc config UserManager start=delayed-auto
+sc config UWPService start=delayed-auto
+sc config Winmgmt start=delayed-auto
+sc config WpnService start=delayed-auto
+
+echo Disable superfetch and app pre-launch
+sc config SysMain start=demand
+net start SysMain
+powershell "Disable-MMAgent -ApplicationPreLaunch"
+net stop SysMain
+sc config SysMain start=disabled
+
+echo Disable prefetcher
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters" /v EnablePrefetcher /t REG_DWORD /d 0 /f
+
+echo Prioritize forground processes 3:1 to background process using a fixed, short time slice
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v Win32PrioritySeparation /d 0x2A /t REG_DWORD /f
+
+echo Align taskbar left
+reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced /v TaskbarAl /t REG_DWORD /d 0 /f
+
+echo Hide Widgets, News and Search taskbar buttons
+reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced /v TaskbarMn /t REG_DWORD /d 0 /f
+reg add HKLM\SOFTWARE\Policies\Microsoft\Dsh /v AllowNewsAndInterests /t REG_DWORD /d 0 /f
+reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Search /v SearchboxTaskbarMode /t REG_DWORD /d 0 /f
+
+echo Show file extensions in Explorer
+reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced /v HideFileExt /t REG_DWORD /d 0 /f
+
+echo Enable accent color on taskbar and start menu
+reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize /v ColorPrevalence /t REG_DWORD /d 1 /f
+
+echo Enable accent color on window titlebars and borders
+reg add HKCU\Software\Microsoft\Windows\DWM /v ColorPrevalence /t REG_DWORD /d 1 /f
+
+echo Enable dark mode
+reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize /v AppsUseLightTheme /t REG_DWORD /d 0 /f
+reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize /v SystemUsesLightTheme /t REG_DWORD /d 0 /f
+
+echo Skip Edge OOBE
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v HideFirstRunExperience /t REG_DWORD /d 1 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v AddressBarMicrosoftSearchInBingProviderEnabled /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v AdsSettingForIntrusiveAdsSites /t REG_DWORD /d 2 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v ConfigureDoNotTrack /t REG_DWORD /d 1 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v DefaultSearchProviderEnabled /t REG_DWORD /d 1 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v EdgeShoppingAssistantEnabled /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v StartupBoostEnabled /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v DefaultBrowserSettingEnabled /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v ShowRecommendationsEnabled /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v ImportAutofillFormData /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v ImportBrowserSettings /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v ImportHistory /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v ImportCookies /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v ImportExtensions /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v ImportFavorites /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v ImportHomepage /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v ImportOpenTabs /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v ImportPaymentInfo /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v ImportSavedPasswords /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v ImportSearchEngine /t REG_DWORD /d 0 /f
+
+echo Remove any existing bloatware
+winget uninstall "Clipchamp"
+winget uninstall "Spotify Music"
+winget uninstall "Disney+"
+winget uninstall "Microsoft Teams"
+winget uninstall "Messenger"
+winget uninstall "Adobe Express"
+winget uninstall "TikTok"
+winget uninstall "Prime Video for Windows"
+winget uninstall "Camo Studio"
+winget uninstall "WhatsApp"
+winget uninstall "LinkedIn"
+
+echo Set start to show more pins and less recommendations
+reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v Start_Layout /t REG_DWORD /d 1 /f
+
+echo Enable controlled folder access
+powershell -c "Set-MpPreference -EnableControlledFolderAccess Enabled"
+
+echo Set time service to auto and start it
+sc config W32Time start=auto
+net start W32Time
+
+echo Cleanup WinSxS store
+dism /online /Cleanup-Image /StartComponentCleanup /ResetBase
+
+echo Cleanup temp files
+start cleanmgr /d %SystemDrive% /verylowdisk /autoclean
+
+echo Cleanup old updates
+del /s/q/f %SystemRoot%\SoftwareDistribution
+'''.strip()
+
+def BUILD(vm):
+  pre_boot_cmds = vm.get_custom_parameter('extra_pre_boot_commands',
+                                          default = '')
+  first_boot_cmds = vm.get_custom_parameter('extra_first_boot_commands',
+                                            default = '')
+  vm = vm.wrap_with_custom_parameters({
+    'extra_pre_boot_commands': _PRE_BOOT_SCRIPT + pre_boot_cmds,
+    'extra_first_boot_commands': _FIRST_BOOT_SCRIPT + first_boot_cmds,
+  })
+  vm.super().BUILD(vm)
+
+__import__('virtuator').handle()

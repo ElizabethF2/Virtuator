@@ -1,0 +1,368 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1
+NAME = 'windows_base'
+ARCH = ['x86_64', 'aarch64', 'x86', 'arm']
+MEMORY = '4G'
+DISKS = [{'SIZE': '64G', 'TYPE': 'NVME'}]
+NETWORK = None
+UEFI = True
+
+_DL_URL = 'https://www.microsoft.com/en-us/software-download'
+_HASH_ALGORITHM = 'SHA256'
+
+_ARCH_MAP = {
+  'x86_64': 'amd64',
+  'aarch64': 'arm64',
+}
+
+_UNATTEND_XML = r'''
+<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+<settings pass="windowsPE">
+<component 
+  name="Microsoft-Windows-Setup"
+  processorArchitecture="_ARCH"
+  publicKeyToken="31bf3856ad364e35"
+  language="neutral"
+  versionScope="nonSxS"
+  xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<UserData>
+<ProductKey>
+<Key />
+</ProductKey>
+</UserData>
+</component>
+</settings>
+<settings pass="specialize">
+<component name="Microsoft-Windows-Deployment" processorArchitecture="_ARCH" language="neutral"
+xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
+<RunSynchronous>
+<RunSynchronousCommand wcm:action="add">
+<Order>1</Order>
+<Path>reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>
+</RunSynchronousCommand>
+</RunSynchronous>
+</component>
+</settings>
+<settings pass="oobeSystem">
+<component
+  name="Microsoft-Windows-Shell-Setup"
+  processorArchitecture="_ARCH"
+  publicKeyToken="31bf3856ad364e35"
+  language="neutral"
+  versionScope="nonSxS"
+  xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<AutoLogon>
+<Enabled>true</Enabled>
+<Username>_USERNAME</Username>
+<Password>
+<Value>_PASSWORD</Value>
+<PlainText>true</PlainText>
+</Password>
+</AutoLogon>
+<ComputerName>_HOSTNAME</ComputerName>
+<OOBE>
+<HideEULAPage>true</HideEULAPage>
+<HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+<HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+<HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+<NetworkLocation>Home</NetworkLocation>
+<SkipUserOOBE>true</SkipUserOOBE>
+<SkipMachineOOBE>true</SkipMachineOOBE>
+<ProtectYourPC>3</ProtectYourPC>
+</OOBE>
+<UserAccounts>
+<LocalAccounts>
+<LocalAccount wcm:action="add">
+<Name>_USERNAME</Name>
+<DisplayName>_USERNAME</DisplayName>
+<Group>Administrators;Power Users</Group>
+<Password>
+<Value></Value>
+<PlainText>true</PlainText>
+</Password>
+</LocalAccount>
+</LocalAccounts>
+</UserAccounts>
+<FirstLogonCommands>
+<SynchronousCommand wcm:action="add">
+<Order>1</Order>
+<CommandLine>cmd /c start cmd /k C:\virtuator_first_boot.bat</CommandLine>
+</SynchronousCommand>
+</FirstLogonCommands>
+</component>
+</settings>
+<settings pass="offlineServicing">
+<component
+  name="Microsoft-Windows-LUA-Settings"
+  processorArchitecture="_ARCH"
+  publicKeyToken="31bf3856ad364e35"
+  language="neutral"
+  versionScope="nonSxS"
+  xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<EnableLUA>false</EnableLUA>
+</component>
+</settings>
+</unattend>
+'''.strip()
+
+_FIRST_BOOT_BAT = r'''
+@ECHO OFF
+
+set code="Get-WindowsCapability -Online -Name *EMS-SAC.Tools*"
+powershell -c "%code% | Add-WindowsCapability -Online"
+set "code="
+
+bcdedit /ems {default} on
+bcdedit /bootems {default} on
+bcdedit /emssettings EMSPORT:1 EMSBAUDRATE:9600
+
+set fname=%TEMP%\diskpart_cleanup_script_%RANDOM%_%RANDOM%.txt
+echo select disk 0 >> "%fname%"
+echo select partition 4 >> "%fname%"
+echo delete partition override >> "%fname%"
+echo select partition 5 >> "%fname%"
+echo delete partition override >> "%fname%"
+echo select partition 3 >> "%fname%"
+echo extend >> "%fname%"
+diskpart /s "%fname%"
+if _CLEANUP_FIRST_BOOT_SCRIPTS NEQ 0 (
+  del "%fname%"
+)
+set "fname="
+
+_EXTRA_FIRST_BOOT_COMMANDS
+
+if _CLEANUP_FIRST_BOOT_SCRIPTS NEQ 0 (
+  del C:\virtuator_first_boot.bat
+)
+
+if _SHUTDOWN_AT_END NEQ 0 (
+  shutdown /s /t 1
+)
+'''.lstrip()
+
+_DISKPART_INSTALL_SCRIPT = '''
+select disk 0
+select partition 1
+assign letter w
+'''
+
+_INSTALL_BAT = r'''
+start /min cmd
+
+diskpart /s D:\diskpart_install_script.txt
+dism /apply-image /imagefile:D:\install.wim /index:1 /applydir:C:\\
+mkdir C:\Windows\Panther
+copy D:\\unattend.xml C:\\Windows\\Panther\\unattend.xml
+copy D:\\virtuator_first_boot.bat C:\\virtuator_first_boot.bat
+
+:uefi_setup_loop
+C:\Windows\System32\timeout.exe 15
+bcdboot C:\Windows /s W: /f UEFI
+if %errorlevel% NEQ 0 (
+  goto uefi_setup_loop
+)
+
+_EXTRA_PRE_BOOT_COMMANDS
+
+wpeutil shutdown
+'''.lstrip()
+
+_STARTNET_CMD = r'''
+cmd /k D:\install.bat
+'''.lstrip()
+
+_MAIN_BUILD_SCRIPT = '''
+  echo =====================================
+  echo Setting up packages used during build
+  echo =====================================
+  ensure_has parted e2fsprogs ntfs-3g ntfs-3g-progs rsync wimlib || exit $?
+  echo
+
+  echo =================
+  echo Partitioning disk
+  echo =================
+  DISK="$(get_disk_at 0)"
+  parted "$DISK" --script mklabel gpt || exit $?
+  parted "$DISK" --script --align optimal mkpart primary fat32 1MiB 200MiB \\
+    || exit $?
+  parted "$DISK" --script set 1 esp on || exit $?
+  parted "$DISK" --align optimal --script mkpart MSR 200MiB 216MiB || exit $?
+  parted "$DISK" --script set 2 msftres on || exit $?
+  parted "$DISK" --script --align optimal mkpart Windows ntfs 216MiB '80%' \\
+    || exit $?
+  parted "$DISK" --script --align optimal mkpart TEMP1 ntfs '80%' '95%' \\
+    || exit $?
+  parted "$DISK" --script --align optimal mkpart TEMP2 fat32 '95%' '100%' \\
+    || exit $?
+  parted "$DISK" --script set 5 esp on || exit $?
+  parted "$DISK" --script print
+  partprobe
+  echo
+
+  echo =====================
+  echo Formatting partitions
+  echo =====================
+  mkfs.vfat -F 32 "$(get_disk_at 0 0)" || exit $?
+  mkfs.ntfs --fast "$(get_disk_at 0 2)" || exit $?
+  mkfs.ntfs --fast "$(get_disk_at 0 3)" || exit $?
+  mkfs.vfat -F 32 "$(get_disk_at 0 4)" || exit $?
+  partprobe
+  echo
+
+  echo ===========================
+  echo Mounting partitions and ISO
+  echo ===========================
+  mkdir -p /tmp/winntfs || exit $?
+  mount_disk_at 0 3 /tmp/winntfs || exit $?
+  mkdir -p /tmp/winefi || exit $?
+  mount_disk_at 0 4 /tmp/winefi || exit $?
+  mkdir -p /tmp/winiso || exit $?
+  mount_disc_at 1 0 /tmp/winiso || exit $?
+  echo
+
+  echo ==============================================
+  echo Copying WinPE files to temporary EFI partition
+  echo ==============================================
+  rsync --recursive --links --times --devices --specials \\
+        --exclude="install.wim" /tmp/winiso/* /tmp/winefi/ || exit $?
+  echo
+
+  echo ======================================================
+  echo Copying installation files to temporary NTFS partition
+  echo ======================================================
+  echo Note: this may take a long time
+  cp /tmp/winiso/sources/install.wim /tmp/winntfs/ || exit $?
+  echo
+
+  echo =================
+  echo Updating boot.wim
+  echo =================
+  wimupdate /tmp/winefi/sources/boot.wim 2 \\
+    --command="add /tmp/startnet.cmd /Windows/System32/startnet.cmd" || exit $?
+  wimupdate /tmp/winefi/sources/boot.wim 2 \\
+    --command="rename /setup.exe /original_setup.exe" || exit $?
+  echo
+
+  echo ==========================================
+  echo Moving scripts to temporary NTFS partition
+  echo ==========================================
+  mv /tmp/unattend.xml /tmp/winntfs/ || exit $?
+  mv /tmp/virtuator_first_boot.bat /tmp/winntfs/ || exit $?
+  mv /tmp/diskpart_install_script.txt /tmp/winntfs/ || exit $?
+  mv /tmp/install.bat /tmp/winntfs/ || exit $?
+  echo
+'''
+
+SKIP_BUILD_BOOT = True
+
+def fix_windows_line_endings(txt):
+  return txt.replace('\r\n', '\n').replace('\n', '\r\n')
+
+def get_username(vm):
+  return vm.get_custom_parameter('windows_username',
+                                 default = 'Admin')
+
+def get_password(vm):
+  return vm.get_custom_parameter('windows_password',
+                                 default = 'admin')
+
+def get_hostname(vm):
+  return vm.get_custom_parameter('windows_hostname',
+                                 default = 'VIRTUATORWIN')
+
+def BUILD(vm):
+  import os
+  vm.vprint(1, 'Windows ISOs and hashes can be found at:')
+  vm.vprint(1, '  ' + _DL_URL)
+  iso_path = vm.get_custom_parameter('windows_iso_path', check = True)
+  vm.vprint(1, 'Hashing ISO')
+  iso_hash = vm.hash_file(iso_path, _HASH_ALGORITHM)
+  vm.vprint(1, 'Please verify the hash below matches the one given at the above URL')
+  vm.vprint(1, '  ISO Path: ' + iso_path)
+  vm.vprint(1, '  Hash Code ({}): {}'.format(_HASH_ALGORITHM, iso_hash))
+  vm.vprint(1, 'Starting a VM with the Windows ISO attached')
+  discs = [vm.get_systemimg_path(), os.path.abspath(iso_path)]
+  vm.manual_boot(discs = discs,
+                 uefi = True,
+                 secure_boot = False,
+                 network = 'user')
+  vm.ensure_shell()
+  vm.vprint(1, 'Copying unattend.xml to VM')
+  narch = vm.get_arch()
+  narch = _ARCH_MAP.get(narch, narch)
+  xml = (
+    _UNATTEND_XML
+      .replace('_USERNAME', get_username(vm))
+      .replace('_PASSWORD', get_password(vm))
+      .replace('_HOSTNAME', get_hostname(vm))
+      .replace('_ARCH', narch)
+  )
+  vm.put_file_data('/tmp/unattend.xml', fix_windows_line_endings(xml))
+  vm.vprint(1, 'Copying first boot script to VM')
+  should_cleanup = vm.get_custom_parameter('should_cleanup_first_boot_scripts',
+                                           default = True)
+  should_shutdown = vm.get_custom_parameter('should_shutdown_after_first_boot',
+                                            default = True)
+  extra_cmds = vm.get_custom_parameter('extra_first_boot_commands',
+                                       default = '')
+  bat = fix_windows_line_endings(
+    _FIRST_BOOT_BAT
+      .replace('_CLEANUP_FIRST_BOOT_SCRIPTS', '1' if should_cleanup else '0')
+      .replace('_SHUTDOWN_AT_END', '1' if should_shutdown else '0')
+      .replace('_EXTRA_FIRST_BOOT_COMMANDS', extra_cmds)
+  )
+  if dpath := vm.get_custom_parameter('windows_first_boot_script_dump_path'):
+    with open(dpath, 'xb') as f:
+      f.write(bat.encode())
+  vm.put_file_data('/tmp/virtuator_first_boot.bat', bat)
+  vm.vprint(1, 'Copying diskpart script to VM')
+  vm.put_file_data('/tmp/diskpart_install_script.txt',
+                   fix_windows_line_endings(_DISKPART_INSTALL_SCRIPT))
+  vm.vprint(1, 'Copying install script to VM')
+  extra_cmds = vm.get_custom_parameter('extra_pre_boot_commands',
+                                       default = '')
+  bat = fix_windows_line_endings(
+    _INSTALL_BAT.replace('_EXTRA_PRE_BOOT_COMMANDS', extra_cmds)
+  )
+  if dpath := vm.get_custom_parameter('windows_pre_boot_script_dump_path'):
+    with open(dpath, 'xb') as f:
+      f.write(bat.encode())
+  if vm.get_custom_parameter('windows_stop_after_script_dump',
+                             default = False):
+    vm.send_keys('poweroff\n')
+    vm.wait_until_stopped()
+    return
+  vm.put_file_data('/tmp/install.bat', bat) 
+  vm.vprint(1, 'Copying startnet.cmd to VM')
+  vm.put_file_data('/tmp/startnet.cmd',
+                   fix_windows_line_endings(_STARTNET_CMD)) 
+  vm.vprint(1, 'Running main build script')
+  vm.pipe_shell(vm.prepend_system_shell_helpers(_MAIN_BUILD_SCRIPT),
+                echo_output = True,
+                check = True)
+  vm.send_keys('poweroff\n')
+  vm.wait_until_stopped()
+  vm.vprint(1, 'Booting and running Windows installer')
+  vm.vprint(2, '  (this will take a long time)')
+  vm.manual_boot()
+  vm.wait_until_stopped()
+  vm.vprint(1, 'Running Windows first boot setup')
+  vm.vprint(2, '  (this will also take a long time)')
+  vm.manual_boot()
+  vm.wait_until_stopped()
+
+def BOOT(vm):
+  vm.wait_for('SAC', timeout = 20)
+
+def STOP(vm):
+  vm.acpi_shutdown()
+  vm.wait_until_stopped()
+
+__import__('virtuator').handle()

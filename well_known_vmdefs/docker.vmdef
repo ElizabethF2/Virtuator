@@ -1,0 +1,32 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1
+NAME = 'docker'
+REQUIRES = 'alpine_linux_with_ssh'
+
+_BUILD_SCRIPT = '''
+echo ===============
+echo Entering chroot
+echo ===============
+echo
+chroot _CHROOT /bin/ash <<CHROOTEOF || exit $?
+  echo =========================
+  echo Installing docker package
+  echo =========================
+  apk add docker || exit $?
+  echo
+
+  echo =======================
+  echo Enabling docker service
+  echo =======================
+  rc-update add docker || exit $?
+  echo
+CHROOTEOF
+'''
+
+def BUILD(vm):
+  vm.super().BUILD(vm)
+  script = _BUILD_SCRIPT.replace('_CHROOT', get_chroot())
+  vm.pipe_shell(script, echo_output = True, check = True)
+
+__import__('virtuator').handle()

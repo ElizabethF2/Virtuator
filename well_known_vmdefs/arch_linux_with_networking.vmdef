@@ -1,0 +1,37 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1
+NAME = 'arch_linux_with_networking'
+ARCH = ['x86_64']
+MEMORY = '512M'
+DISKS = [{'SIZE':'50G'}]
+NETWORK = 'user'
+REQUIRES = 'arch_linux_base'
+
+_BUILD_SCRIPT = '''
+echo ---------------
+echo Entering chroot
+echo ---------------
+echo
+chroot _CHROOT bash arch-chroot / bash <<ARCHROOTEOF || exit $?
+  echo ------------------------------
+  echo Installing networking packages
+  echo ------------------------------
+  pacman -Syu --needed --noconfirm networkmanager || exit $?
+  echo
+
+  echo -----------------------
+  echo Enabling networkmanager
+  echo -----------------------
+  systemctl enable NetworkManager || exit $?
+  echo
+ARCHROOTEOF
+'''
+
+def BUILD(vm):
+  vm.super().BUILD(vm)
+  vm.pipe_shell(_BUILD_SCRIPT.replace('_CHROOT', get_chroot()),
+                echo_output = True,
+                check = True)
+
+__import__('virtuator').handle()

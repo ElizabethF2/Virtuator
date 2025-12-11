@@ -1,0 +1,27 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1
+NAME = 'windows_with_networking'
+NETWORK = 'user_physical'
+REQUIRES = 'windows_base'
+
+_UPDATE_SCRIPT = r'''
+usoclient startinteractivescan
+set ns=root\cimv2\mdm\dmmap
+set cl=MDM_EnterpriseModernAppManagement_AppManagement01
+set scan=UpdateScanMethod
+powershell -c "(Get-WmiObject -Namespace '%ns%' -Class '%cl%').%scan%()"
+set ns=
+set cl=
+set scan=
+'''.strip()
+
+def BUILD(vm):
+  extra_cmds = vm.get_custom_parameter('extra_first_boot_commands',
+                                       default = '')
+  vm = vm.wrap_with_custom_parameters({
+    'extra_first_boot_commands': _UPDATE_SCRIPT + extra_cmds
+  })
+  vm.super().BUILD(vm)
+
+__import__('virtuator').handle()

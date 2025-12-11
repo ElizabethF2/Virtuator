@@ -1,0 +1,40 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1
+NAME = 'minipc'
+ARCH = ['x86_64'] # TODO others
+MEMORY = '8G'
+DISKS = [{'SIZE': '50G'}]
+NETWORK = None
+
+_BUILD_SCRIPT = r'''
+KNOWN_HASH="1a1c204ddeb2261c1c0c813e2e638c48fa4b98cfd8da2cb"
+KNOWN_HASH="$KNOWN_HASH""833fcce7fa3c743fdd3d4a70653d7cfab83c4b216429c97"
+KNOWN_HASH="$KNOWN_HASH""3e0da0a7095ec40362c2a8346491d8853d"
+
+apk add git python3 dmg2img
+mkdir -p ~/osx
+cd ~/osx
+git clone --depth 1 --recursive https://github.com/kholia/OSX-KVM osx_kvm
+cd osx_kvm
+git checkout adde00327ac767b012d8e5cab114db4acd129f6f
+rm -rf .git resources/OcBinaryData/.git
+_hash="$(find -exec sha512sum {} + 2>&1 | sha512sum | cut -d' ' -f1)"
+[ "x$_hash" = "x$KNOWN_HASH" ] || exit 1
+
+python fetch-macOS-v2.py -s ventura  # TODO check how fetch script verifies dmg
+
+dmg2img -i BaseSystem.dmg BaseSystem.img
+
+# cat BaseSystem.img > "$(get_disk_at 0)"
+
+'''
+
+def BUILD(vm):
+  breakpoint()
+  script = vm.prepend_system_shell_helpers(_BUILD_SCRIPT)
+  vm.pipe_shell(script, echo_output = True, check = True)
+
+locals().update(get_super().__dict__ | locals())
+
+__import__('virtuator').handle()

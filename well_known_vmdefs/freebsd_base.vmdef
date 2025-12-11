@@ -1,0 +1,232 @@
+#!/bin/env python3
+
+VMDEF_VERSION = 1
+NAME = 'freebsd'
+ARCH = ['x86_64', 'aarch64', 'x86', 'arm', 'riscv']
+MEMORY = '512M'
+DISKS = [{'SIZE': '50G'}]
+NETWORK = 'user'
+
+_ARCH_MAP = {
+  'x86_64': 'amd64',
+  'aarch64': 'aarch64',
+  'x86': 'i386',
+  'arm': 'armv7',
+  'riscv': 'riscv64',
+}
+
+_CHECKSUM_BUILD_SCRIPT = '''
+  echo =====================================
+  echo Setting up packages used during build
+  echo =====================================
+  ensure_has gpg || exit $?
+  echo
+
+  echo ============================
+  echo Acquiring known signing keys
+  echo ============================
+  KEYS_URL="https://docs.freebsd.org/pgpkeys/pgpkeys.txt"
+  KEYS_HASH="d462e44431d7fc453f4407bbbf2ea50da13add68876a60a94ed007bfaeabe6528"
+  KEYS_HASH=$KEYS_HASH"d9167a0fae6cc1d211215093b12793ffd7b69cf07a0950d89429eec"
+  KEYS_HASH=$KEYS_HASH"f8e7cf48"
+  download_file "$KEYS_URL" /tmp/freebsd.keys || exit $?
+  sha512sum /tmp/freebsd.keys | grep "$KEYS_HASH" >/dev/null || exit $?
+  gpg --import /tmp/freebsd.keys
+  echo
+
+  echo =====================
+  echo Downloading checksums
+  echo =====================
+  download_file "CHECKSUM_URL" /tmp/freebsd.asc || exit $?
+  echo
+  
+  echo ===================
+  echo Verifying checksums
+  echo ===================
+  gpg --auto-key-retrieve --verify /tmp/freebsd.asc || exit #?
+  echo
+'''
+
+RELEASES_URL = 'https://www.freebsd.org/releases'
+DOWNLOADS_URL = 'https://www.freebsd.org/where'
+
+def _get_iso_and_signed_checksum_urls(vm, ext):
+  import re, urllib.request, urllib.parse
+  arch = vm.get_arch()
+  arch = _ARCH_MAP.get(arch, arch)
+  req = urllib.request.urlopen(RELEASES_URL)
+  htm = req.read().decode()
+  sig_url = sorted(re.findall(r'https://.+?/signatures[^\'"]*', htm))[-1]
+  release = re.search(r'\d[\d\.]+', sig_url).group(0)
+  req = urllib.request.urlopen(sig_url)
+  htm = req.read().decode()
+  rx = r'href\s*=\s*[\'"](.+?checksums/.+?{}[^\'"]+)'.format(arch)
+  checksum_urls = sorted(re.findall(rx, htm))
+  checksum_url = list(
+    filter(lambda i: '-vm' not in i and 'sha512' in i.lower(),
+           checksum_urls)
+  )[-1]
+  checksum_url = urllib.parse.urljoin(sig_url, checksum_url)
+  req = urllib.request.urlopen(DOWNLOADS_URL)
+  htm = req.read().decode()
+  rx = 'https://.+?{}/ISO-IMAGES[^\'"]+'.format(arch)
+  urls = sorted(set(re.findall(rx, htm)))
+  urls = sorted(
+    filter(lambda i: '/{}/'.format(release) in i and '/releases/' in i,
+           urls)
+  )
+  url = urls[-1]
+  req = urllib.request.urlopen(url)
+  htm = req.read().decode()
+  isos = re.findall(r'[\'"]([^\'"]+bootonly{})[\'"]'.format(ext), htm)
+  iso_fname = sorted(set(isos))[-1]
+  iso_url = urllib.parse.urljoin(url, iso_fname)
+  return iso_url, checksum_url
+
+def _download_iso(vm, vm_data_dir, ext, iso_url, buffer_size = 512 * 1024):
+  import os, urllib.request, hashlib
+  iso_path = os.path.join(vm_data_dir, 'freebsd' + ext)
+  req = urllib.request.urlopen(iso_url)
+  iso_hash = hashlib.sha512()
+  with open(iso_path, 'wb') as f:
+    while True:
+      buf = req.read(buffer_size)
+      if not buf:
+        break
+      f.write(buf)
+      iso_hash.update(buf)
+  return iso_path, iso_hash.hexdigest()
+
+def _boot_with_comconsole(vm):
+  vm.vprint(2, 'Waiting for boot loader menu')
+  vm.wait_for('3. ')
+  vm.wait_for('loader prompt')
+  vm.send_keys('3')
+  vm.vprint(2, 'Entering loader prompt')
+  vm.wait_for('OK ')
+  vm.vprint(2, 'Setting console to comconsole')
+  vm.send_keys('set console=')
+  vm.wait_for('set console=')
+  vm.send_keys('comconsole')
+  vm.wait_for('comconsole')
+  vm.send_keys('\n')
+  vm.wait_for('OK ')
+  vm.vprint(2, 'Resuming boot')
+  vm.send_keys('boot')
+  vm.wait_for('boot')
+  vm.send_keys('\n')
+
+def _complete_bsdinstall(vm):
+  vm.vprint(2, 'Waiting for console type prompt')
+  vm.wait_for('Console type')
+  vm.wait_for(']:')
+  vm.send_keys('\n')
+  buf = ''
+  vm.vprint(2, 'Running bsdinstall')
+  while True:
+    b = vm.read_output().decode()
+    vm.vprint(3, '  ' + repr(b.strip())[:78])
+    buf += b
+    if 'Last Chance!' in buf:
+      vm.send_keys('y')
+      buf = ''
+    elif 'VirtIO Block Device' in buf:
+      if '[ ]' in buf and '[*]' not in buf:
+        vm.send_keys(' \n')
+      elif '[*]' in buf:
+        pass
+      else:
+        raise RuntimeError('Invalid state')
+    elif 'Add User Accounts' in buf:
+      vm.send_keys('n')
+      buf = ''
+    elif 'Manual Configuration' in buf:
+      vm.send_keys('n')
+      buf = ''
+      break
+    elif any((i in buf for i in (
+            'Welcome to FreeBSD!',
+            'Keymap Selection',
+            'Set Hostname',
+            'Distribution Select',
+            'Network Installation',
+            'Network Configuration',
+            'Partitioning',
+            'Mirror Selection',
+            'enter a name',
+            'Password:',
+            'password:',
+            'Time Zone Selector',
+            'Confirmation',
+            'Time & Date',
+            'System Configuration',
+            'System Hardening',
+            'Final Configuration',
+            'Not enough disks selected',
+           ))) or (
+            'ZFS Configuration' in buf and (
+              '  OK  ' in buf or
+              'Select' in buf
+             )
+           ):
+      vm.send_keys('\n')
+      buf = ''
+  vm.wait_for('Complete')
+  vm.send_keys(chr(3))
+  vm.wait_for('login:')
+  vm.send_keys('root')
+  vm.wait_for(' # ')
+
+def BUILD(vm):
+  import re, subprocess, shutil
+  vm.vprint(1, 'Locating download URLs')
+  xz = shutil.which('xz')
+  ext = '.iso.xz' if xz else '.iso'
+  iso_url, checksum_url = _get_iso_and_signed_checksum_urls(vm, ext)
+  vm.vprint(2, '  ISO URL:')
+  vm.vprint(2, '    {}'.format(iso_url))
+  vm.vprint(2, '  signature URL:')
+  vm.vprint(2, '    {}'.format(checksum_url))
+  vm.vprint(1, 'Downloading ISO')
+  vm_data_dir = vm.get_per_vm_data_dir()
+  iso_path = os.path.join(vm_data_dir, 'freebsd' + ext)
+  iso_hash, _ = vm.download_and_hash(iso_url, iso_path, 'sha512', mode = 'wb')
+  vm.vprint(1, 'Running checksum build script')
+  script = (
+    vm.prepend_system_shell_helpers(_CHECKSUM_BUILD_SCRIPT)
+      .replace('CHECKSUM_URL', checksum_url)
+  )
+  output, ret = vm.pipe_shell(script, echo_output = True, check = True)
+  vm.vprint(1, 'Verifying ISO against checksum')
+  output, _ = vm.run_command('cat /tmp/freebsd.asc', check = True)
+  signed_iso_hash = list(filter(
+    lambda i: 'bootonly' in i[0] and i[0].endswith(ext),
+    re.findall(r'\((.+?)\)\s*=\s*([A-Fa-f0-9]+)', output.decode())
+  ))[0][1]
+  if iso_hash.lower() != signed_iso_hash.lower():
+    raise RuntimeError('Hash mismatch on ISO')
+  if xz:
+    vm.vprint(1, 'Extracting ISO')
+    subprocess.check_call((xz, '-d', iso_path))
+    iso_path = iso_path[:-3]
+  STOP(vm)
+  vm.manual_boot(discs = [iso_path],
+                 prefer_discs = True)
+  _boot_with_comconsole(vm)
+  _complete_bsdinstall(vm)
+  shutil.rmtree(vm_data_dir)
+  STOP(vm)
+
+def BOOT(vm):  
+  _boot_with_comconsole(vm)
+  vm.wait_for('login:')
+  vm.send_keys('root\n')
+  vm.wait_for('Password:', timeout = 10)
+  vm.send_keys('\n')
+  vm.wait_for(' # ')
+
+def STOP(vm):
+  vm.run_command('poweroff')
+  vm.wait_until_stopped()
+
+__import__('virtuator').handle()
