@@ -38,7 +38,3 @@ python -c "import hashlib,urllib.request;r=urllib.request.urlopen('https://examp
 If you see an error regarding `python` not being found or not being recognized as a command or, on Windows, if the store app opens, try replacing `python` with `python3` or `py`. If you get the error `No module named request`, try running the command again with `python` replaced with `python3` and ensure your version of Python is up to date.
 
 To uninstall, run `virtuator uninstall`.
-
-
-
-

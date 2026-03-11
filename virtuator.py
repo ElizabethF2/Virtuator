@@ -10,8 +10,6 @@ _apply_packager_overwrites()
 
 '''
 
-
-
 import sys, platform, io, os, stat, errno, time
 import subprocess, shutil, shlex, signal, socket
 import types, string, collections, functools, threading
